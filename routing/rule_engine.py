@@ -1,29 +1,51 @@
 import logging
+import random
 
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────
-# SESSION STORE  (in-memory, keyed by Telegram chat_id)
+# SESSION STORE (in-memory, keyed by Telegram chat_id)
 # ──────────────────────────────────────────────────────────
 sessions = {}
 
 # ──────────────────────────────────────────────────────────
-# STATE CONSTANTS
+# STATES
 # ──────────────────────────────────────────────────────────
-START              = "START"
-COLLECT_NAME       = "COLLECT_NAME"
-COLLECT_PHONE      = "COLLECT_PHONE"
-COLLECT_EMAIL      = "COLLECT_EMAIL"
-SERVICE_SELECTION   = "SERVICE_SELECTION"
-COLLECT_AMOUNT     = "COLLECT_AMOUNT"
-PAYMENT_SELECTION  = "PAYMENT_SELECTION"
-RECEIVER_DETAILS   = "RECEIVER_DETAILS"
-KYC_PENDING        = "KYC_PENDING"
-KYC_SUBMITTED      = "KYC_SUBMITTED"
-PROCESSING         = "PROCESSING"
-COMPLETED          = "COMPLETED"
-ESCALATED          = "ESCALATED"
-AWAITING_FOLLOWUP  = "AWAITING_FOLLOWUP"
+START               = "START"
+COLLECT_FIRST_NAME  = "COLLECT_FIRST_NAME"
+COLLECT_LAST_NAME   = "COLLECT_LAST_NAME"
+COLLECT_PHONE       = "COLLECT_PHONE"
+CONFIRM_PHONE       = "CONFIRM_PHONE"
+COLLECT_AMOUNT      = "COLLECT_AMOUNT"
+CONFIRM_AMOUNT      = "CONFIRM_AMOUNT"
+PAYMENT_SELECTION   = "PAYMENT_SELECTION"
+FIRST_TIME_CHECK    = "FIRST_TIME_CHECK"
+# KYC states
+KYC_FULL_NAME       = "KYC_FULL_NAME"
+KYC_PHONE           = "KYC_PHONE"
+KYC_EMAIL           = "KYC_EMAIL"
+KYC_COMPANY         = "KYC_COMPANY"
+KYC_ID_PHOTO        = "KYC_ID_PHOTO"
+# Receiver states
+RECEIVER_NAME       = "RECEIVER_NAME"
+RECEIVER_PHONE      = "RECEIVER_PHONE"
+RECEIVER_COMPANY    = "RECEIVER_COMPANY"
+RECEIVER_POSITION   = "RECEIVER_POSITION"
+RECEIVER_BANK_NAME  = "RECEIVER_BANK_NAME"
+RECEIVER_ACCOUNT    = "RECEIVER_ACCOUNT"
+RECEIVER_IFSC       = "RECEIVER_IFSC"
+REFERRAL            = "REFERRAL"
+COMPLETED           = "COMPLETED"
+ESCALATED           = "ESCALATED"
+
+# ──────────────────────────────────────────────────────────
+# CONFIG (exchange rate, fees — easy to update)
+# ──────────────────────────────────────────────────────────
+EXCHANGE_RATE = 66.76
+ETRANSFER_FEE = 6
+DEBIT_FEE = 4
+OFFICE_ADDRESS = '1900 Clarke Blvd Unit 7'
+OFFICE_HOURS = '6pm today'
 
 # ──────────────────────────────────────────────────────────
 # HELPERS
@@ -38,339 +60,375 @@ COMPLAINT_WORDS = {'angry', 'complain', 'terrible', 'worst', 'suck',
 
 RESET_WORDS = {'restart', 'start over', 'new transaction', 'reset', 'begin again'}
 
+
 def _is_ack(text: str) -> bool:
     return text.strip().lower() in ACKNOWLEDGEMENTS
+
+
+def _is_yes(text: str) -> bool:
+    return text.strip().lower() in {'yes', 'yeah', 'yep', 'sure', 'yea', 'y', 'ok', 'okay'}
+
+
+def _is_no(text: str) -> bool:
+    return text.strip().lower() in {'no', 'nah', 'nope', 'n'}
+
 
 def _new_session() -> dict:
     return {
         'state': START,
-        'name': None,
+        'first_name': None,
+        'last_name': None,
         'phone': None,
-        'email': None,
-        'service': None,
         'amount': None,
+        'amount_num': 0,
         'payment_method': None,
-        'receiver': None,
-        'kyc_id': None,
+        'is_first_time': None,
+        # KYC
+        'kyc_name': None,
+        'kyc_phone': None,
+        'kyc_email': None,
+        'kyc_company': None,
+        'kyc_id_photo': False,
+        # Receiver
+        'recv_name': None,
+        'recv_phone': None,
+        'recv_company': None,
+        'recv_position': None,
+        'recv_bank': None,
+        'recv_account': None,
+        'recv_ifsc': None,
+        'referral': None,
+        'ref_number': None,
     }
 
-def _summary(s: dict) -> str:
-    """Build a quick summary of collected info."""
-    parts = []
-    if s.get('name'):    parts.append(f"Name: {s['name']}")
-    if s.get('phone'):   parts.append(f"Phone: {s['phone']}")
-    if s.get('email'):   parts.append(f"Email: {s['email']}")
-    if s.get('service'): parts.append(f"Service: {s['service']}")
-    if s.get('amount'):  parts.append(f"Amount: {s['amount']}")
-    return "\n".join(parts) if parts else ""
+
+def _build_rate_breakdown(amount: float) -> str:
+    """Build the payment options breakdown like the professional bot."""
+    etransfer_recv = (amount - ETRANSFER_FEE) * EXCHANGE_RATE
+    debit_recv = (amount - DEBIT_FEE) * EXCHANGE_RATE
+    cash_recv = amount * EXCHANGE_RATE
+
+    return (
+        f"💰 You want to send: ${amount:,.2f} CAD\n\n"
+        f"🏦 Payment Options:\n\n"
+        f"E-Transfer:\n"
+        f"• You pay: ${amount:,.1f} CAD\n"
+        f"• Fee: ${ETRANSFER_FEE} (deducted internally)\n"
+        f"• They receive: ₹{etransfer_recv:,.0f} INR\n"
+        f"• Rate: {EXCHANGE_RATE}\n\n"
+        f"Debit Card:\n"
+        f"• You pay: ${amount:,.1f} CAD\n"
+        f"• Fee: ${DEBIT_FEE} (deducted internally)\n"
+        f"• They receive: ₹{debit_recv:,.0f} INR\n"
+        f"• Rate: {EXCHANGE_RATE}\n\n"
+        f"Cash/Bank Draft:\n"
+        f"• You pay: ${amount:,.1f} CAD\n"
+        f"• NO FEE - They receive: ₹{cash_recv:,.0f} INR\n"
+        f"• Rate: {EXCHANGE_RATE}\n\n"
+        f"Want to send this amount?"
+    )
+
+
+def _gen_ref() -> str:
+    return f"RND{random.randint(2000000, 2999999)}"
 
 
 # ──────────────────────────────────────────────────────────
-# MAIN ENTRY POINT  (called from main.py)
+# MAIN ENTRY POINT
 # ──────────────────────────────────────────────────────────
 def process_message(chat_id: str, text: str) -> str:
-    """
-    Stateful conversation handler.
-    Always returns a string — never returns None.
-    One question at a time, acknowledges input, then moves forward.
-    """
     lower = text.strip().lower()
 
     # ── Reset ──────────────────────────────────────────
     if any(w in lower for w in RESET_WORDS):
         sessions.pop(chat_id, None)
-        return "No problem! Starting fresh.\n\nHi there! I'm your remittance assistant. What's your name?"
+        sessions[chat_id] = _new_session()
+        sessions[chat_id]['state'] = COLLECT_FIRST_NAME
+        return (
+            "Hey there! Welcome to RND Traders 🇨🇦🇮🇳\n\n"
+            "I'm here to help you send money to India - fast and easy.\n\n"
+            "What's your name?"
+        )
 
-    # ── New user / first message ───────────────────────
+    # ── New user ───────────────────────────────────────
     if chat_id not in sessions:
         sessions[chat_id] = _new_session()
-        sessions[chat_id]['state'] = COLLECT_NAME
+        sessions[chat_id]['state'] = COLLECT_FIRST_NAME
         return (
-            "Welcome! I'm your personal remittance assistant.\n"
-            "I can help you with money transfers, KYC verification, account services, and more.\n\n"
-            "To get started, may I know your name?"
+            "Hey there! Welcome to RND Traders 🇨🇦🇮🇳\n\n"
+            "I'm here to help you send money to India - fast and easy.\n\n"
+            "What's your name?"
         )
 
     s = sessions[chat_id]
     state = s['state']
 
-    # ── Escalation (always check first) ────────────────
+    # ── Complaint escalation (always check) ────────────
     if any(w in lower for w in COMPLAINT_WORDS):
         s['state'] = ESCALATED
         return (
-            "I'm really sorry to hear that. Your case has been escalated to our support team.\n"
-            "A human agent will reach out to you shortly. Thank you for your patience."
+            "I'm really sorry to hear that. Your case has been escalated to our team.\n"
+            "A human agent will reach out to you shortly."
         )
 
     if state == ESCALATED:
         if _is_ack(lower):
-            return "Thank you for your patience. An agent will contact you soon. Is there anything else I can help with?"
-        if 'new' in lower or 'another' in lower or 'else' in lower:
+            return "Thank you for your patience. An agent will contact you soon."
+        if any(w in lower for w in ['new', 'another', 'send', 'transfer']):
             sessions[chat_id] = _new_session()
-            sessions[chat_id]['state'] = COLLECT_NAME
-            return "Sure! Let's start fresh.\nMay I know your name?"
-        return "Your case is with our support team. They'll reach out shortly. Would you like to start a new transaction instead?"
+            sessions[chat_id]['state'] = COLLECT_FIRST_NAME
+            return "Sure! Let's start fresh.\nWhat's your name?"
+        return "Your case is with our team. Would you like to start a new transaction instead?"
 
-    # ── Help at any point ──────────────────────────────
+    # ── Help ───────────────────────────────────────────
     if lower == 'help':
         return (
-            "Here's what I can help you with:\n"
-            "• Money transfers & remittances\n"
+            "I can help you with:\n"
+            "• Sending money to India\n"
+            "• Exchange rates\n"
             "• KYC / ID verification\n"
-            "• Account registration\n"
-            "• Rate enquiries\n"
-            "• Complaints & support\n\n"
-            "Just tell me what you need, or we can continue where we left off."
+            "• Payment options\n\n"
+            "Let's continue where we left off, or type 'restart' to start over."
         )
 
     # ══════════════════════════════════════════════════
     #  STATE MACHINE
     # ══════════════════════════════════════════════════
 
-    # ── COLLECT_NAME ───────────────────────────────────
-    if state == COLLECT_NAME:
-        s['name'] = text.strip().title()
+    # ── COLLECT_FIRST_NAME ─────────────────────────────
+    if state == COLLECT_FIRST_NAME:
+        s['first_name'] = text.strip().title()
+        s['state'] = COLLECT_LAST_NAME
+        return f"Okay {s['first_name']}, and what's your last name?"
+
+    # ── COLLECT_LAST_NAME ──────────────────────────────
+    if state == COLLECT_LAST_NAME:
+        s['last_name'] = text.strip().title()
         s['state'] = COLLECT_PHONE
-        return f"Nice to meet you, {s['name']}! Could you share your phone number?"
+        return f"Got it, {s['first_name']} {s['last_name']}! And what's your Canadian phone number? (10 digits)"
 
     # ── COLLECT_PHONE ──────────────────────────────────
     if state == COLLECT_PHONE:
-        cleaned = text.strip().replace(' ', '').replace('-', '').replace('+', '')
+        cleaned = text.strip().replace(' ', '').replace('-', '').replace('+', '').replace('(', '').replace(')', '')
         if not cleaned.isdigit() or len(cleaned) < 7:
-            return "That doesn't look like a valid phone number. Please enter your phone number (digits only)."
+            return "That doesn't look right. Please enter your phone number (digits only, 10 digits)."
         s['phone'] = text.strip()
-        s['state'] = SERVICE_SELECTION
-        return (
-            f"Got it, {s['name']}! Phone number recorded.\n\n"
-            "What would you like to do today?\n"
-            "1. Send money / Transfer\n"
-            "2. KYC / ID Verification\n"
-            "3. Check rates\n"
-            "4. Account inquiry\n"
-            "5. Something else"
-        )
+        s['state'] = CONFIRM_PHONE
+        return f"Thanks {s['first_name']}! Is that the number you'll be using to send the e-transfer from?"
 
-    # ── SERVICE_SELECTION ──────────────────────────────
-    if state == SERVICE_SELECTION:
-        if any(w in lower for w in ['1', 'send', 'money', 'transfer', 'remit']):
-            s['service'] = 'money_transfer'
+    # ── CONFIRM_PHONE ──────────────────────────────────
+    if state == CONFIRM_PHONE:
+        if _is_yes(lower) or _is_ack(lower):
             s['state'] = COLLECT_AMOUNT
-            return "Sure! How much would you like to send? (Please enter the amount)"
-
-        if any(w in lower for w in ['2', 'kyc', 'verify', 'verification', 'id']):
-            s['service'] = 'kyc'
-            s['state'] = KYC_PENDING
-            return "Let's get your identity verified.\nPlease provide your ID number (e.g., Aadhaar, Passport, or PAN)."
-
-        if any(w in lower for w in ['3', 'rate', 'rates', 'price', 'cost', 'exchange']):
-            s['service'] = 'rates'
-            s['state'] = AWAITING_FOLLOWUP
-            return (
-                "Here are today's indicative rates:\n"
-                "• USD → INR: 83.20\n"
-                "• GBP → INR: 105.50\n"
-                "• EUR → INR: 90.10\n\n"
-                "Would you like to proceed with a transfer, or is there anything else?"
-            )
-
-        if any(w in lower for w in ['4', 'account', 'balance', 'inquiry']):
-            s['service'] = 'account'
-            s['state'] = COLLECT_EMAIL
-            return "Sure! Could you share the email address linked to your account?"
-
-        if any(w in lower for w in ['5', 'else', 'other', 'something']):
-            s['state'] = AWAITING_FOLLOWUP
-            return "No problem! Just tell me what you need and I'll do my best to help."
-
-        # Didn't match a numbered option — gentle nudge
-        if _is_ack(lower):
-            return (
-                "Great! So what would you like to do?\n"
-                "1. Send money\n"
-                "2. KYC / Verification\n"
-                "3. Check rates\n"
-                "4. Account inquiry\n"
-                "5. Something else"
-            )
-
-        return (
-            "I didn't quite catch that. Could you pick one of these?\n"
-            "1. Send money\n"
-            "2. KYC / Verification\n"
-            "3. Check rates\n"
-            "4. Account inquiry\n"
-            "5. Something else"
-        )
-
-    # ── COLLECT_EMAIL ──────────────────────────────────
-    if state == COLLECT_EMAIL:
-        if '@' not in text:
-            return "That doesn't look like a valid email. Could you please enter your email address?"
-        s['email'] = text.strip()
-        s['state'] = AWAITING_FOLLOWUP
-        return (
-            f"Thank you! Email {s['email']} has been recorded.\n"
-            "Is there anything else you'd like me to help with?"
-        )
+            return f"Perfect! And how much CAD are you planning to send to India today?"
+        if _is_no(lower):
+            s['state'] = COLLECT_PHONE
+            return "No problem! Please enter the correct phone number (10 digits)."
+        # They might have typed a new number directly
+        cleaned = text.strip().replace(' ', '').replace('-', '').replace('+', '').replace('(', '').replace(')', '')
+        if cleaned.isdigit() and len(cleaned) >= 7:
+            s['phone'] = text.strip()
+            return f"Got it, updated to {text.strip()}. Is this correct?"
+        s['state'] = COLLECT_AMOUNT
+        return f"Perfect! And how much CAD are you planning to send to India today?"
 
     # ── COLLECT_AMOUNT ─────────────────────────────────
     if state == COLLECT_AMOUNT:
+        # Try to parse amount
+        amount_str = text.strip().replace('$', '').replace(',', '').replace('CAD', '').replace('cad', '').strip()
+        try:
+            amount = float(amount_str)
+        except ValueError:
+            return "Please enter a valid amount in CAD (e.g., 1000 or 500.50)."
         s['amount'] = text.strip()
+        s['amount_num'] = amount
+        s['state'] = CONFIRM_AMOUNT
+        return _build_rate_breakdown(amount)
+
+    # ── CONFIRM_AMOUNT ─────────────────────────────────
+    if state == CONFIRM_AMOUNT:
+        if _is_yes(lower) or _is_ack(lower):
+            s['state'] = PAYMENT_SELECTION
+            return "Awesome! How would you like to pay - e-transfer, debit, cash, or bank draft?"
+        if _is_no(lower):
+            s['state'] = COLLECT_AMOUNT
+            return "No worries! How much CAD would you like to send instead?"
+        # They might be adjusting the amount
+        amount_str = text.strip().replace('$', '').replace(',', '').replace('CAD', '').replace('cad', '').strip()
+        try:
+            amount = float(amount_str)
+            s['amount'] = text.strip()
+            s['amount_num'] = amount
+            return _build_rate_breakdown(amount)
+        except ValueError:
+            pass
         s['state'] = PAYMENT_SELECTION
-        return (
-            f"Got it — {s['amount']}.\n\n"
-            "How would you like to pay?\n"
-            "1. Bank transfer\n"
-            "2. UPI\n"
-            "3. Card payment\n"
-            "4. Cash deposit"
-        )
+        return "Awesome! How would you like to pay - e-transfer, debit, cash, or bank draft?"
 
     # ── PAYMENT_SELECTION ──────────────────────────────
     if state == PAYMENT_SELECTION:
-        methods = {
-            '1': 'Bank Transfer', 'bank': 'Bank Transfer',
-            '2': 'UPI', 'upi': 'UPI',
-            '3': 'Card', 'card': 'Card Payment',
-            '4': 'Cash', 'cash': 'Cash Deposit',
-        }
-        matched = None
-        for key, val in methods.items():
-            if key in lower:
-                matched = val
-                break
+        if any(w in lower for w in ['e-transfer', 'etransfer', 'e transfer', 'interac']):
+            s['payment_method'] = 'E-Transfer'
+            s['state'] = FIRST_TIME_CHECK
+            return "Sure, let's get that started! Have you sent money with us before, or is this your first time?"
 
-        if not matched:
-            if _is_ack(lower):
-                return "Which payment method would you prefer?\n1. Bank transfer\n2. UPI\n3. Card\n4. Cash deposit"
-            return "Please select a payment method:\n1. Bank transfer\n2. UPI\n3. Card\n4. Cash deposit"
+        if any(w in lower for w in ['debit', 'card']):
+            s['payment_method'] = 'Debit Card'
+            s['state'] = FIRST_TIME_CHECK
+            return "Sure, let's get that started! Have you sent money with us before, or is this your first time?"
 
-        s['payment_method'] = matched
-        s['state'] = RECEIVER_DETAILS
-        return (
-            f"Payment via {matched} — noted!\n\n"
-            "Now, please share the receiver's name or account details."
-        )
-
-    # ── RECEIVER_DETAILS ───────────────────────────────
-    if state == RECEIVER_DETAILS:
-        s['receiver'] = text.strip()
-        s['state'] = PROCESSING
-        summary = _summary(s)
-        return (
-            f"Here's a summary of your transaction:\n"
-            f"{summary}\n"
-            f"Receiver: {s['receiver']}\n"
-            f"Payment: {s['payment_method']}\n\n"
-            "Everything look correct? Type 'yes' to confirm or 'cancel' to start over."
-        )
-
-    # ── PROCESSING (confirmation step) ─────────────────
-    if state == PROCESSING:
-        if 'cancel' in lower or 'no' in lower:
-            sessions[chat_id] = _new_session()
-            sessions[chat_id]['state'] = SERVICE_SELECTION
-            return "Transaction cancelled. What would you like to do instead?\n1. Send money\n2. KYC\n3. Check rates\n4. Account inquiry"
-
-        if _is_ack(lower) or 'yes' in lower or 'confirm' in lower:
-            s['state'] = COMPLETED
+        if any(w in lower for w in ['cash', 'bank draft', 'draft', 'bank']):
+            s['payment_method'] = 'Cash/Bank Draft'
+            s['state'] = FIRST_TIME_CHECK
             return (
-                "Your transaction has been submitted successfully! 🎉\n"
-                "Reference: #TXN" + str(hash(chat_id))[-6:] + "\n\n"
-                "We'll send you a confirmation shortly.\n"
-                "Is there anything else I can help you with?"
+                f"Okay great, so you'll be paying by bank draft! "
+                f"Just make it payable to \"RND TRADERS INC.\" and bring it to our office "
+                f"at {OFFICE_ADDRESS}. We're open till {OFFICE_HOURS}!\n\n"
+                f"Have you sent money with us before, or is this your first time?"
             )
 
-        return "Just to confirm — shall I go ahead and process this transaction? (yes/no)"
+        return "Please choose a payment method: e-transfer, debit, cash, or bank draft?"
 
-    # ── KYC_PENDING ────────────────────────────────────
-    if state == KYC_PENDING:
-        s['kyc_id'] = text.strip()
-        s['state'] = KYC_SUBMITTED
+    # ── FIRST_TIME_CHECK ───────────────────────────────
+    if state == FIRST_TIME_CHECK:
+        if any(w in lower for w in ['first', 'new', 'never', 'no', 'nope']):
+            s['is_first_time'] = True
+            s['state'] = KYC_FULL_NAME
+            return "Let's get started! What's your full name?"
+        if any(w in lower for w in ['yes', 'yeah', 'before', 'returning', 'existing']):
+            s['is_first_time'] = False
+            s['state'] = RECEIVER_NAME
+            return (
+                "Welcome back! ✅\n\n"
+                "Let's set up the receiver. What's their full name in India?"
+            )
+        return "Just to clarify - have you sent money with us before? (yes/no)"
+
+    # ══════════════════════════════════════════════════
+    #  KYC FLOW (first-time customers)
+    # ══════════════════════════════════════════════════
+
+    # ── KYC_FULL_NAME ──────────────────────────────────
+    if state == KYC_FULL_NAME:
+        s['kyc_name'] = text.strip().title()
+        first = s['kyc_name'].split()[0] if s['kyc_name'] else s['first_name']
+        s['state'] = KYC_PHONE
+        return f"Thanks, {first}! What's your Canadian phone number? (10 digits)"
+
+    # ── KYC_PHONE ──────────────────────────────────────
+    if state == KYC_PHONE:
+        s['kyc_phone'] = text.strip()
+        s['state'] = KYC_EMAIL
+        return "Got it! What's your email? We'll send confirmations there."
+
+    # ── KYC_EMAIL ──────────────────────────────────────
+    if state == KYC_EMAIL:
+        s['kyc_email'] = text.strip()
+        s['state'] = KYC_COMPANY
+        return "What company do you work for? (or type \"Self-employed\" / \"Student\")"
+
+    # ── KYC_COMPANY ────────────────────────────────────
+    if state == KYC_COMPANY:
+        s['kyc_company'] = text.strip()
+        s['state'] = KYC_ID_PHOTO
+        return "Almost there! Please send a photo of your government-issued ID (Passport, Driver's License, etc.)"
+
+    # ── KYC_ID_PHOTO ───────────────────────────────────
+    if state == KYC_ID_PHOTO:
+        # Accept any reply as the ID (text description or they sent a photo)
+        s['kyc_id_photo'] = True
+        s['state'] = RECEIVER_NAME
         return (
-            f"Thanks! I've submitted your ID ({s['kyc_id']}) for verification.\n"
-            "We'll notify you once it's approved.\n"
-            "Is there anything else you'd like help with?"
+            "Got your ID photo! Our team will verify it shortly.\n\n"
+            "Let's continue - ✅ Your details are done! "
+            "Now for the person in India - what's their full name?"
         )
 
-    # ── KYC_SUBMITTED ──────────────────────────────────
-    if state == KYC_SUBMITTED:
-        if _is_ack(lower):
-            s['state'] = AWAITING_FOLLOWUP
-            return "You're all set! We're processing your verification now. I'll update you shortly.\nAnything else I can help with?"
-        if any(w in lower for w in ['send', 'money', 'transfer']):
-            s['state'] = COLLECT_AMOUNT
-            s['service'] = 'money_transfer'
-            return "Sure! How much would you like to send?"
-        if 'status' in lower:
-            return "Your KYC is being reviewed. We'll notify you as soon as it's approved. Hang tight!"
-        s['state'] = AWAITING_FOLLOWUP
-        return "Your verification is being processed. Would you like to start a money transfer while you wait, or something else?"
+    # ══════════════════════════════════════════════════
+    #  RECEIVER DETAILS
+    # ══════════════════════════════════════════════════
+
+    # ── RECEIVER_NAME ──────────────────────────────────
+    if state == RECEIVER_NAME:
+        s['recv_name'] = text.strip().title()
+        s['state'] = RECEIVER_PHONE
+        return "Their phone number in India? (10 digits)"
+
+    # ── RECEIVER_PHONE ─────────────────────────────────
+    if state == RECEIVER_PHONE:
+        s['recv_phone'] = text.strip()
+        s['state'] = RECEIVER_COMPANY
+        return "What company do they work for?"
+
+    # ── RECEIVER_COMPANY ───────────────────────────────
+    if state == RECEIVER_COMPANY:
+        s['recv_company'] = text.strip()
+        s['state'] = RECEIVER_POSITION
+        return "And what's their position/job title?"
+
+    # ── RECEIVER_POSITION ──────────────────────────────
+    if state == RECEIVER_POSITION:
+        s['recv_position'] = text.strip()
+        s['state'] = RECEIVER_BANK_NAME
+        return "Now for their bank details.\nWhat bank do they use? (e.g., ICICI, SBI, HDFC)"
+
+    # ── RECEIVER_BANK_NAME ─────────────────────────────
+    if state == RECEIVER_BANK_NAME:
+        s['recv_bank'] = text.strip().upper()
+        s['state'] = RECEIVER_ACCOUNT
+        return "Their bank account number?"
+
+    # ── RECEIVER_ACCOUNT ───────────────────────────────
+    if state == RECEIVER_ACCOUNT:
+        s['recv_account'] = text.strip()
+        s['state'] = RECEIVER_IFSC
+        return "And the IFSC code? (e.g., ICIC01248H23)"
+
+    # ── RECEIVER_IFSC ──────────────────────────────────
+    if state == RECEIVER_IFSC:
+        s['recv_ifsc'] = text.strip().upper()
+        s['state'] = REFERRAL
+        return (
+            f"✅ Bank details saved: 🏦 {s['recv_bank']},\n"
+            f"🔢 {s['recv_account']}, 🏛 {s['recv_ifsc']}\n\n"
+            "Almost done! Did someone refer you?\n"
+            "Type their name or \"no\"."
+        )
+
+    # ── REFERRAL ───────────────────────────────────────
+    if state == REFERRAL:
+        if _is_no(lower):
+            s['referral'] = None
+        else:
+            s['referral'] = text.strip()
+        s['ref_number'] = _gen_ref()
+        s['state'] = COMPLETED
+        return (
+            f"Thank you for using our service!\n"
+            f"Your reference no: {s['ref_number']}\n"
+            f"We are processing your transfer...\n\n"
+            f"You'll receive a confirmation shortly. Is there anything else I can help with?"
+        )
 
     # ── COMPLETED ──────────────────────────────────────
     if state == COMPLETED:
-        if _is_ack(lower) or 'no' in lower or 'nothing' in lower or 'bye' in lower:
-            s['state'] = AWAITING_FOLLOWUP
-            return "Thank you for using our service! Feel free to message me anytime you need help. Have a great day! 😊"
-        if any(w in lower for w in ['yes', 'another', 'new', 'more', 'send', 'transfer']):
-            s['state'] = SERVICE_SELECTION
-            return (
-                "Let's go! What would you like to do?\n"
-                "1. Send money\n"
-                "2. KYC / Verification\n"
-                "3. Check rates\n"
-                "4. Account inquiry"
-            )
-        s['state'] = SERVICE_SELECTION
-        return (
-            "What else can I help you with?\n"
-            "1. Send money\n"
-            "2. KYC / Verification\n"
-            "3. Check rates\n"
-            "4. Account inquiry"
-        )
+        if _is_ack(lower) or _is_no(lower) or 'nothing' in lower or 'bye' in lower:
+            return "Thank you for choosing RND Traders! Have a great day! 😊"
+        if any(w in lower for w in ['yes', 'another', 'new', 'send', 'transfer', 'more']):
+            sessions[chat_id] = _new_session()
+            sessions[chat_id]['state'] = COLLECT_AMOUNT
+            sessions[chat_id]['first_name'] = s['first_name']
+            sessions[chat_id]['last_name'] = s['last_name']
+            sessions[chat_id]['phone'] = s['phone']
+            return f"Let's go, {s['first_name']}! How much CAD would you like to send this time?"
+        return "Would you like to send another transfer or is there anything else? Type 'restart' for a fresh start."
 
-    # ── AWAITING_FOLLOWUP ──────────────────────────────
-    if state == AWAITING_FOLLOWUP:
-        if _is_ack(lower) or 'no' in lower or 'nothing' in lower or 'bye' in lower:
-            return "No worries! I'm here whenever you need. Have a great day! 😊"
-        if any(w in lower for w in ['yes', 'send', 'money', 'transfer', 'remit']):
-            s['state'] = COLLECT_AMOUNT
-            s['service'] = 'money_transfer'
-            return "Sure! How much would you like to send?"
-        if any(w in lower for w in ['kyc', 'verify', 'id', 'verification']):
-            s['state'] = KYC_PENDING
-            s['service'] = 'kyc'
-            return "Let's get you verified. Please share your ID number."
-        if any(w in lower for w in ['rate', 'rates', 'exchange', 'price']):
-            return (
-                "Today's indicative rates:\n"
-                "• USD → INR: 83.20\n"
-                "• GBP → INR: 105.50\n"
-                "• EUR → INR: 90.10\n\n"
-                "Shall I start a transfer for you?"
-            )
-        if any(w in lower for w in ['account', 'balance', 'email']):
-            s['state'] = COLLECT_EMAIL
-            return "Sure! Could you share the email linked to your account?"
-        # Generic follow-up — stay in state, don't dump disclaimers
-        s['state'] = SERVICE_SELECTION
-        return (
-            "I'd love to help! What would you like to do?\n"
-            "1. Send money\n"
-            "2. KYC / Verification\n"
-            "3. Check rates\n"
-            "4. Account inquiry\n"
-            "5. Something else"
-        )
-
-    # ── Fallback (should rarely be reached) ────────────
-    logger.warning(f"Unknown state '{state}' for chat {chat_id}, resetting to service selection.")
-    s['state'] = SERVICE_SELECTION
+    # ── Fallback (should not happen) ───────────────────
+    logger.warning(f"Unknown state '{state}' for {chat_id}, resetting.")
+    sessions[chat_id] = _new_session()
+    sessions[chat_id]['state'] = COLLECT_FIRST_NAME
     return (
-        "Let me help you! What would you like to do?\n"
-        "1. Send money\n"
-        "2. KYC / Verification\n"
-        "3. Check rates\n"
-        "4. Account inquiry"
+        "Hey there! Welcome to RND Traders 🇨🇦🇮🇳\n\n"
+        "I'm here to help you send money to India - fast and easy.\n\n"
+        "What's your name?"
     )
