@@ -38,6 +38,8 @@ RECEIVER_IFSC       = "RECEIVER_IFSC"
 RECV_DELIVERY_METHOD = "RECV_DELIVERY_METHOD"
 RECV_BANK_DETAILS   = "RECV_BANK_DETAILS"
 REFERRAL            = "REFERRAL"
+ETRANSFER_INSTRUCTIONS = "ETRANSFER_INSTRUCTIONS"
+AWAITING_SCREENSHOT = "AWAITING_SCREENSHOT"
 COMPLETED           = "COMPLETED"
 ESCALATED           = "ESCALATED"
 
@@ -62,6 +64,10 @@ COMPLAINT_WORDS = {'angry', 'complain', 'terrible', 'worst', 'suck',
                    'dissatisfied', 'hate', 'fraud', 'scam', 'cheat'}
 
 RESET_WORDS = {'restart', 'start over', 'new transaction', 'reset', 'begin again'}
+
+EMAIL_REQUEST_WORDS = {'email', 'e-transfer email', 'etransfer email', 'send an email',
+                       'email for e-transfer', 'email for etransfer', 'what email',
+                       'which email', 'payment email', 'where to send'}
 
 
 def _is_ack(text: str) -> bool:
@@ -103,6 +109,7 @@ def _new_session() -> dict:
         'recv_ifsc': None,
         'referral': None,
         'ref_number': None,
+        'etransfer_sent': False,
     }
 
 
@@ -137,6 +144,26 @@ def _gen_ref() -> str:
     return f"RND{random.randint(2000000, 2999999)}"
 
 
+def _build_etransfer_instructions(amount: float, ref_number: str, phone: str) -> str:
+    """Build the e-transfer payment instructions message."""
+    return (
+        f"Send ${amount:,.2f} by e-transfer to:\n"
+        f"payments@rndtraders.com\n\n"
+        f"Please send from your personal account. If you are sending the payment "
+        f"from a business account, we will need the Articles of Incorporation.\n\n"
+        f"Name - Remit Payment\n"
+        f"Put this reference number in e-transfer message box\n"
+        f"Message : {ref_number}- RND TRADERS INC\n\n"
+        f"And keep this as security question and answer\n"
+        f"Question- Remit\n"
+        f"Answer - APL7458RND\n\n"
+        f"Send screenshot once done- $6 Charge for each e-transfer\n\n"
+        f"Put your phone number in the message so we can match it up. "
+        f"Once you've sent it, just let me know!\n\n"
+        f"Type *I've Sent* when done, or *Cancel* to change payment method."
+    )
+
+
 # ──────────────────────────────────────────────────────────
 # MAIN ENTRY POINT
 # ──────────────────────────────────────────────────────────
@@ -162,6 +189,27 @@ def process_message(chat_id: str, text: str) -> str:
             "Hey there! Welcome to RND Traders 🇨🇦🇮🇳\n\n"
             "I'm here to help you send money to India - fast and easy.\n\n"
             "What's your name?"
+        )
+
+    # ── Email for e-transfer request (any state) ──────
+    if chat_id in sessions and any(w in lower for w in EMAIL_REQUEST_WORDS):
+        s = sessions[chat_id]
+        # If they already have a ref number, use it; otherwise generate one
+        if not s.get('ref_number'):
+            s['ref_number'] = _gen_ref()
+        amount = s.get('amount_num', 0) or 500  # default if no amount set yet
+        return (
+            "RND Traders INC.: Send E-transfer to:\n"
+            "payments@rndtraders.com\n\n"
+            "Please send from your personal account. If you are sending the payment "
+            "from a business account, we will need the Articles of Incorporation.\n\n"
+            "Name - Remit Payment\n"
+            f"Put this reference number in e-transfer message box\n"
+            f"Message : {s['ref_number']}- RND TRADERS INC\n\n"
+            "And keep this as security question and answer\n"
+            "Question- Remit\n"
+            "Answer - APL7458RND\n\n"
+            "Send screenshot once done- $6 Charge for each e-transfer"
         )
 
     s = sessions[chat_id]
@@ -448,12 +496,51 @@ def process_message(chat_id: str, text: str) -> str:
         else:
             s['referral'] = text.strip()
         s['ref_number'] = _gen_ref()
+
+        # Branch: if e-transfer, send payment instructions instead of generic completion
+        if s.get('payment_method') == 'E-Transfer':
+            s['state'] = ETRANSFER_INSTRUCTIONS
+            return _build_etransfer_instructions(
+                s['amount_num'], s['ref_number'], s.get('phone', '')
+            )
+
+        # Non e-transfer → straight to completed
         s['state'] = COMPLETED
         return (
             f"Thank you for using our service!\n"
             f"Your reference no: {s['ref_number']}\n"
             f"We are processing your transfer...\n\n"
             f"You'll receive a confirmation shortly. Is there anything else I can help with?"
+        )
+
+    # ── ETRANSFER_INSTRUCTIONS ─────────────────────────
+    if state == ETRANSFER_INSTRUCTIONS:
+        if any(w in lower for w in ["i've sent", 'ive sent', 'i sent', 'sent', 'done', 'i have sent']):
+            s['etransfer_sent'] = True
+            s['state'] = AWAITING_SCREENSHOT
+            return (
+                "Great! Please send a screenshot of the e-transfer confirmation "
+                "so we can verify and process your transfer."
+            )
+        if any(w in lower for w in ['cancel', 'back', 'change']):
+            s['state'] = PAYMENT_SELECTION
+            return "No problem! How would you like to pay instead - e-transfer, debit, cash, or bank draft?"
+        # Resend the instructions
+        return _build_etransfer_instructions(
+            s['amount_num'], s['ref_number'], s.get('phone', '')
+        )
+
+    # ── AWAITING_SCREENSHOT ────────────────────────────
+    if state == AWAITING_SCREENSHOT:
+        # Accept photo marker or any text/confirmation
+        inr_amount = (s['amount_num'] - ETRANSFER_FEE) * EXCHANGE_RATE
+        s['state'] = COMPLETED
+        return (
+            f"Awesome, your transfer is created! Your reference number is "
+            f"{s['ref_number']} — save that so you can track it anytime.\n\n"
+            f"${s['amount_num']:,.2f} CAD → ₹{inr_amount:,.0f} INR\n\n"
+            f"We'll keep you posted on the progress!\n\n"
+            f"Is there anything else I can help with?"
         )
 
     # ── COMPLETED ──────────────────────────────────────
@@ -467,6 +554,12 @@ def process_message(chat_id: str, text: str) -> str:
             sessions[chat_id]['last_name'] = s['last_name']
             sessions[chat_id]['phone'] = s['phone']
             return f"Let's go, {s['first_name']}! How much CAD would you like to send this time?"
+        if any(w in lower for w in ['track', 'tracking', 'status']):
+            return (
+                f"Your transfer reference: {s['ref_number']}\n"
+                f"Status: Processing ⏳\n\n"
+                f"We'll notify you once it's delivered. You can ask for your status anytime!"
+            )
         return "Would you like to send another transfer or is there anything else? Type 'restart' for a fresh start."
 
     # ── Fallback (should not happen) ───────────────────
