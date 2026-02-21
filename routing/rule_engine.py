@@ -25,6 +25,7 @@ KYC_FULL_NAME       = "KYC_FULL_NAME"
 KYC_PHONE           = "KYC_PHONE"
 KYC_EMAIL           = "KYC_EMAIL"
 KYC_COMPANY         = "KYC_COMPANY"
+KYC_POSITION        = "KYC_POSITION"
 KYC_ID_PHOTO        = "KYC_ID_PHOTO"
 # Receiver states
 RECEIVER_NAME       = "RECEIVER_NAME"
@@ -34,6 +35,8 @@ RECEIVER_POSITION   = "RECEIVER_POSITION"
 RECEIVER_BANK_NAME  = "RECEIVER_BANK_NAME"
 RECEIVER_ACCOUNT    = "RECEIVER_ACCOUNT"
 RECEIVER_IFSC       = "RECEIVER_IFSC"
+RECV_DELIVERY_METHOD = "RECV_DELIVERY_METHOD"
+RECV_BANK_DETAILS   = "RECV_BANK_DETAILS"
 REFERRAL            = "REFERRAL"
 COMPLETED           = "COMPLETED"
 ESCALATED           = "ESCALATED"
@@ -88,6 +91,7 @@ def _new_session() -> dict:
         'kyc_phone': None,
         'kyc_email': None,
         'kyc_company': None,
+        'kyc_position': None,
         'kyc_id_photo': False,
         # Receiver
         'recv_name': None,
@@ -330,17 +334,23 @@ def process_message(chat_id: str, text: str) -> str:
     # ── KYC_COMPANY ────────────────────────────────────
     if state == KYC_COMPANY:
         s['kyc_company'] = text.strip()
+        s['state'] = KYC_POSITION
+        return "And what's your position/job title?"
+
+    # ── KYC_POSITION ───────────────────────────────────
+    if state == KYC_POSITION:
+        s['kyc_position'] = text.strip()
         s['state'] = KYC_ID_PHOTO
         return "Almost there! Please send a photo of your government-issued ID (Passport, Driver's License, etc.)"
 
     # ── KYC_ID_PHOTO ───────────────────────────────────
     if state == KYC_ID_PHOTO:
-        # Accept any reply as the ID (text description or they sent a photo)
+        # Accept photo marker or any text reply
         s['kyc_id_photo'] = True
         s['state'] = RECEIVER_NAME
         return (
             "Got your ID photo! Our team will verify it shortly.\n\n"
-            "Let's continue - ✅ Your details are done! "
+            "Let's continue - \u2705 Your details are done! "
             "Now for the person in India - what's their full name?"
         )
 
@@ -369,28 +379,64 @@ def process_message(chat_id: str, text: str) -> str:
     # ── RECEIVER_POSITION ──────────────────────────────
     if state == RECEIVER_POSITION:
         s['recv_position'] = text.strip()
-        s['state'] = RECEIVER_BANK_NAME
-        return "Now for their bank details.\nWhat bank do they use? (e.g., ICICI, SBI, HDFC)"
+        s['state'] = RECV_DELIVERY_METHOD
+        return (
+            "How should the money reach them?\n\n"
+            "Type **bank** for Bank Transfer or **home** for Home Delivery."
+        )
 
-    # ── RECEIVER_BANK_NAME ─────────────────────────────
-    if state == RECEIVER_BANK_NAME:
-        s['recv_bank'] = text.strip().upper()
-        s['state'] = RECEIVER_ACCOUNT
-        return "Their bank account number?"
+    # ── RECV_DELIVERY_METHOD ────────────────────────────
+    if state == RECV_DELIVERY_METHOD:
+        if any(w in lower for w in ['bank', 'transfer', 'account']):
+            s['state'] = RECV_BANK_DETAILS
+            return (
+                "Please share the receiver's bank details in one message:\n\n"
+                "\u2022 Bank Name (e.g. SBI, PNB, HDFC)\n"
+                "\u2022 Account Number\n"
+                "\u2022 IFSC Code"
+            )
+        if any(w in lower for w in ['home', 'delivery', 'cash']):
+            s['state'] = REFERRAL
+            return (
+                "\u2705 Home delivery selected!\n"
+                "We'll arrange delivery to the receiver's address.\n\n"
+                "Almost done! Did someone refer you?\n"
+                "Type their name or \"no\"."
+            )
+        return "Please type **bank** for Bank Transfer or **home** for Home Delivery."
 
-    # ── RECEIVER_ACCOUNT ───────────────────────────────
-    if state == RECEIVER_ACCOUNT:
-        s['recv_account'] = text.strip()
-        s['state'] = RECEIVER_IFSC
-        return "And the IFSC code? (e.g., ICIC01248H23)"
+    # ── RECV_BANK_DETAILS (one message) ───────────────
+    if state == RECV_BANK_DETAILS:
+        # Parse bank details from one message
+        lines = text.strip().split('\n')
+        bank_name = ''
+        account = ''
+        ifsc = ''
+        for line in lines:
+            line_clean = line.strip()
+            low_line = line_clean.lower()
+            if 'bank' in low_line and ':' in low_line:
+                bank_name = line_clean.split(':', 1)[1].strip()
+            elif 'account' in low_line and ':' in low_line:
+                account = line_clean.split(':', 1)[1].strip()
+            elif 'ifsc' in low_line and ':' in low_line:
+                ifsc = line_clean.split(':', 1)[1].strip()
 
-    # ── RECEIVER_IFSC ──────────────────────────────────
-    if state == RECEIVER_IFSC:
-        s['recv_ifsc'] = text.strip().upper()
+        # If user didn't follow format, try splitting by lines
+        if not bank_name and len(lines) >= 1:
+            bank_name = lines[0].strip()
+        if not account and len(lines) >= 2:
+            account = lines[1].strip()
+        if not ifsc and len(lines) >= 3:
+            ifsc = lines[2].strip()
+
+        s['recv_bank'] = bank_name.upper() if bank_name else 'N/A'
+        s['recv_account'] = account if account else 'N/A'
+        s['recv_ifsc'] = ifsc.upper() if ifsc else 'N/A'
         s['state'] = REFERRAL
         return (
-            f"✅ Bank details saved: 🏦 {s['recv_bank']},\n"
-            f"🔢 {s['recv_account']}, 🏛 {s['recv_ifsc']}\n\n"
+            f"\u2705 Bank details saved: \U0001f3e6 {s['recv_bank']},\n"
+            f"\U0001f522 {s['recv_account']}, \U0001f3db {s['recv_ifsc']}\n\n"
             "Almost done! Did someone refer you?\n"
             "Type their name or \"no\"."
         )

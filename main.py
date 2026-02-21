@@ -26,21 +26,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Text: {text}")
 
     try:
-        # 1. Rule Engine execution First
         response_text = process_message(chat_id, text)
 
-        # 2. AI Fallback if rules don't match
         if not response_text:
             logger.info("-> Rules didn't match. Routing to AI...")
             response_text = get_ai_response(text)
         else:
             logger.info("-> Rule matched! Response generated.")
 
-        # 3. Send Response
         await send_telegram_message(update, context, response_text)
 
     except Exception as err:
         logger.error(f"Error processing message: {err}")
+        await send_telegram_message(update, context, "An error occurred. Please try again later.")
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photo messages — used for ID uploads during KYC."""
+    chat_id = str(update.effective_chat.id)
+    caption = update.message.caption or ""
+
+    logger.info(f"--- Received PHOTO from {chat_id} ---")
+    logger.info(f"Caption: {caption}")
+
+    try:
+        # Pass a special marker so rule_engine knows it's a photo
+        response_text = process_message(chat_id, "[PHOTO_RECEIVED]")
+
+        if not response_text:
+            response_text = "Thanks for the image! How can I help you?"
+
+        await send_telegram_message(update, context, response_text)
+
+    except Exception as err:
+        logger.error(f"Error processing photo: {err}")
+        await send_telegram_message(update, context, "An error occurred. Please try again later.")
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle document uploads — also used for ID scans."""
+    chat_id = str(update.effective_chat.id)
+
+    logger.info(f"--- Received DOCUMENT from {chat_id} ---")
+
+    try:
+        response_text = process_message(chat_id, "[PHOTO_RECEIVED]")
+
+        if not response_text:
+            response_text = "Thanks for the document! How can I help you?"
+
+        await send_telegram_message(update, context, response_text)
+
+    except Exception as err:
+        logger.error(f"Error processing document: {err}")
         await send_telegram_message(update, context, "An error occurred. Please try again later.")
 
 
@@ -51,8 +89,14 @@ if __name__ == '__main__':
 
     application = ApplicationBuilder().token(config.TELEGRAM_TOKEN).build()
 
-    # Handle all text messages that are not commands
+    # Handle text messages (not commands)
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+
+    # Handle photo uploads (for KYC ID)
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    # Handle document uploads (for KYC ID scans/PDFs)
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     logger.info("Telegram Bot is up and running!")
     application.run_polling()
