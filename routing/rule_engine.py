@@ -454,7 +454,7 @@ def process_message(chat_id: str, text: str) -> str:
             s['state'] = FIRST_TIME_CHECK
             return "Sure! Have you sent money with us before, or is this your first time?"
 
-        if any(w in lower for w in ['cash', 'bank draft', 'draft']):
+        if any(w in lower for w in ['cash', 'bank draft', 'bank', 'draft']):
             s['payment_method'] = 'Cash/Bank Draft'
             s['state'] = FIRST_TIME_CHECK
             return (
