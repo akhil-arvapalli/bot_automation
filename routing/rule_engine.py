@@ -1,5 +1,6 @@
 import logging
 import random
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ RECV_BANK_IFSC           = "RECV_BANK_IFSC"
 RECV_BANK_CONFIRM        = "RECV_BANK_CONFIRM"
 REFERRAL                 = "REFERRAL"
 REFERRAL_NAME            = "REFERRAL_NAME"
+ORDER_SUMMARY            = "ORDER_SUMMARY"
 ETRANSFER_INSTRUCTIONS   = "ETRANSFER_INSTRUCTIONS"
 AWAITING_SCREENSHOT      = "AWAITING_SCREENSHOT"
 COMPLETED                = "COMPLETED"
@@ -43,17 +45,54 @@ DEBIT_FEE      = 4
 OFFICE_ADDRESS = "1900 Clarke Blvd Unit 7"
 OFFICE_HOURS   = "6pm today"
 
+# ── Punjabi keyword mappings ──────────────────────────
+PUNJABI_YES = {
+    'ਹਾਂ', 'ਹਾਂਜੀ', 'ਜੀ', 'ਜੀ ਹਾਂ', 'ਬਿਲਕੁਲ', 'ਜ਼ਰੂਰ',
+    'haanji', 'haan', 'hanji', 'ji', 'ji haan', 'bilkul', 'zaroor',
+}
+
+PUNJABI_NO = {
+    'ਨਹੀਂ', 'ਨਹੀਂ ਜੀ', 'ਨਾ',
+    'nahi', 'nahin', 'nahi ji', 'na',
+}
+
+PUNJABI_ACK = {
+    'ਠੀਕ', 'ਠੀਕ ਹੈ', 'ਚੰਗਾ', 'ਅੱਛਾ', 'ਸ਼ੁਕਰੀਆ', 'ਧੰਨਵਾਦ',
+    'theek', 'theek hai', 'thik', 'thik hai', 'changa', 'accha',
+    'shukriya', 'dhannvaad', 'mehrbani',
+}
+
+PUNJABI_COMPLAINT = {
+    'ਗੁੱਸਾ', 'ਸ਼ਿਕਾਇਤ', 'ਮਾੜਾ', 'ਧੋਖਾ', 'ਫਰਾਡ',
+    'gussa', 'shikayat', 'maada', 'dhokha',
+}
+
+PUNJABI_RESET = {
+    'ਨਵਾਂ', 'ਦੁਬਾਰਾ', 'ਸ਼ੁਰੂ',
+    'nava', 'dubara', 'shuru', 'navi transaction',
+}
+
+PUNJABI_HELP = {
+    'ਮਦਦ', 'ਸਹਾਇਤਾ',
+    'madad', 'sahaita',
+}
+
+PUNJABI_SEND_MONEY = {
+    'ਪੈਸੇ ਭੇਜਣੇ', 'ਪੈਸੇ ਭੇਜਣਾ', 'ਪੈਸੇ', 'ਭੇਜਣੇ',
+    'paise bhejna', 'paise bhejne', 'paisa bhejo',
+}
+
 ACKNOWLEDGEMENTS = {
     'ok', 'okay', 'yes', 'yeah', 'sure', 'yep', 'alright',
     'got it', 'thanks', 'thank you', 'thankyou', 'thx',
     'cool', 'fine', 'great', 'perfect', 'done', 'noted',
     'good', 'right', 'correct', 'hmm', 'k', 'kk', 'yea',
-}
+} | PUNJABI_ACK
 
 COMPLAINT_WORDS = {'angry', 'complain', 'terrible', 'worst', 'suck',
-                   'dissatisfied', 'hate', 'fraud', 'scam', 'cheat'}
+                   'dissatisfied', 'hate', 'fraud', 'scam', 'cheat'} | PUNJABI_COMPLAINT
 
-RESET_WORDS = {'restart', 'start over', 'new transaction', 'reset', 'begin again'}
+RESET_WORDS = {'restart', 'start over', 'new transaction', 'reset', 'begin again'} | PUNJABI_RESET
 
 EMAIL_REQUEST_WORDS = {
     'email', 'e-transfer email', 'etransfer email', 'send an email',
@@ -67,11 +106,18 @@ def _is_ack(text: str) -> bool:
 
 
 def _is_yes(text: str) -> bool:
-    return text.strip().lower() in {'yes', 'yeah', 'yep', 'sure', 'yea', 'y', 'ok', 'okay'}
+    t = text.strip().lower()
+    return t in {'yes', 'yeah', 'yep', 'sure', 'yea', 'y', 'ok', 'okay'} or t in PUNJABI_YES
 
 
 def _is_no(text: str) -> bool:
-    return text.strip().lower() in {'no', 'nah', 'nope', 'n'}
+    t = text.strip().lower()
+    return t in {'no', 'nah', 'nope', 'n'} or t in PUNJABI_NO
+
+
+def _is_punjabi(text: str) -> bool:
+    """Detect if the text contains Punjabi (Gurmukhi) script characters."""
+    return bool(re.search(r'[\u0A00-\u0A7F]', text))
 
 
 def _new_session() -> dict:
@@ -161,6 +207,64 @@ def _validate_phone(text: str) -> bool:
     return cleaned.isdigit() and len(cleaned) >= 7
 
 
+def _build_order_summary(s: dict) -> str:
+    """Build a full order recap before proceeding to payment."""
+    amount = s.get('amount_num', 0)
+    method = s.get('payment_method', 'N/A')
+
+    # Calculate INR based on payment method
+    if method == 'E-Transfer':
+        fee = ETRANSFER_FEE
+    elif method == 'Debit Card':
+        fee = DEBIT_FEE
+    else:
+        fee = 0
+    inr_amount = (amount - fee) * EXCHANGE_RATE
+
+    summary = (
+        f"📋 *Order Summary*\n"
+        f"{'─' * 28}\n\n"
+        f"👤 *Sender*\n"
+        f"• Name: {s.get('first_name', '')} {s.get('last_name', '')}\n"
+        f"• Phone: {s.get('phone', 'N/A')}\n\n"
+    )
+
+    if s.get('recv_name'):
+        summary += (
+            f"📩 *Receiver*\n"
+            f"• Name: {s.get('recv_name', '')}\n"
+            f"• Phone: {s.get('recv_phone', 'N/A')}\n"
+        )
+        if s.get('recv_bank'):
+            summary += (
+                f"• Bank: {s.get('recv_bank', '')}\n"
+                f"• Account: {s.get('recv_account', '')}\n"
+                f"• IFSC: {s.get('recv_ifsc', '')}\n"
+            )
+        summary += "\n"
+
+    summary += (
+        f"💰 *Transfer Details*\n"
+        f"• Amount: ${amount:,.2f} CAD\n"
+        f"• Payment: {method}\n"
+    )
+    if fee > 0:
+        summary += f"• Fee: ${fee}\n"
+    summary += (
+        f"• They receive: ₹{inr_amount:,.0f} INR\n"
+        f"• Rate: {EXCHANGE_RATE}\n\n"
+    )
+
+    if s.get('referral'):
+        summary += f"🤝 Referred by: {s['referral']}\n\n"
+
+    summary += (
+        f"{'─' * 28}\n"
+        f"Does everything look correct? (yes/no)"
+    )
+    return summary
+
+
 def _finalize(s: dict) -> str:
     if s.get('payment_method') == 'E-Transfer':
         s['state'] = ETRANSFER_INSTRUCTIONS
@@ -179,6 +283,29 @@ def _finalize(s: dict) -> str:
 
 def process_message(chat_id: str, text: str) -> str:
     lower = text.strip().lower()
+    is_punjabi_msg = _is_punjabi(text)
+
+    # Detect Punjabi send-money intent at any point
+    if any(w in lower for w in PUNJABI_SEND_MONEY):
+        if chat_id not in sessions or sessions[chat_id]['state'] in (START, COMPLETED):
+            sessions[chat_id] = _new_session()
+            sessions[chat_id]['state'] = COLLECT_FIRST_NAME
+            return (
+                "Hey there! Welcome to RND Traders 🇨🇦🇮🇳\n\n"
+                "I'm here to help you send money to India - fast and easy.\n\n"
+                "What's your first name?"
+            )
+
+    # Detect Punjabi help intent
+    if any(w in lower for w in PUNJABI_HELP):
+        return (
+            "I can help you with:\n"
+            "• Sending money to India\n"
+            "• Exchange rates\n"
+            "• KYC / ID verification\n"
+            "• Payment options\n\n"
+            "Let's continue where we left off, or type 'restart' to start over."
+        )
 
     if any(w in lower for w in RESET_WORDS):
         sessions[chat_id] = _new_session()
@@ -342,14 +469,14 @@ def process_message(chat_id: str, text: str) -> str:
     # ── STEP 5: First-time vs returning ───────────────
 
     if state == FIRST_TIME_CHECK:
-        if any(w in lower for w in ['first', 'new', 'never', 'no', 'nope']):
+        if any(w in lower for w in ['first', 'new', 'never', 'no', 'nope']) or _is_no(lower):
             s['is_first_time'] = True
             s['state'] = KYC_FULL_NAME
             return (
                 "No problem! We just need a few details to get you set up.\n\n"
                 "What's your full legal name?"
             )
-        if any(w in lower for w in ['yes', 'yeah', 'before', 'returning', 'existing', 'yep', 'yea']):
+        if any(w in lower for w in ['yes', 'yeah', 'before', 'returning', 'existing', 'yep', 'yea']) or _is_yes(lower):
             s['is_first_time'] = False
             s['state'] = RECEIVER_NAME
             return (
@@ -501,10 +628,22 @@ def process_message(chat_id: str, text: str) -> str:
     if state == REFERRAL:
         if _is_no(lower):
             s['referral'] = None
-            s['ref_number'] = _gen_ref()
-            return _finalize(s)
-        s['referral'] = text.strip()
+        else:
+            s['referral'] = text.strip()
         s['ref_number'] = _gen_ref()
+        s['state'] = ORDER_SUMMARY
+        return _build_order_summary(s)
+
+    # ── STEP 8b: Order Summary ────────────────────────
+
+    if state == ORDER_SUMMARY:
+        if _is_yes(lower) or _is_ack(lower):
+            return _finalize(s)
+        if _is_no(lower):
+            # Let them restart from amount
+            s['state'] = COLLECT_AMOUNT
+            return "No problem! Let's redo this. How much CAD would you like to send?"
+        # If they typed something else, treat as confirmation
         return _finalize(s)
 
     # ── STEP 9: E-Transfer instructions ───────────────
