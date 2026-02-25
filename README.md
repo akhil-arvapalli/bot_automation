@@ -36,7 +36,7 @@ You will need to open **two** separate command prompts / terminals to run the sy
 #### 1: Start the Local API Server
 In your first terminal, run:
 ```bash
-cd d:\DAREXAI\whatsap_bot
+cd /path/to/whatsap_bot
 node index.js
 ```
 *Wait for it to say `Server is listening on port 3000`.*
@@ -44,7 +44,7 @@ node index.js
 #### 2: Start the Webhook Tunnel
 In your second terminal, run:
 ```bash
-cd d:\DAREXAI\whatsap_bot
+cd /path/to/whatsap_bot
 ssh -o StrictHostKeyChecking=accept-new -R 80:localhost:3000 nokey@localhost.run
 ```
 *Wait for the URL (e.g. `https://1a2b3c...lhr.life`). Look out for the domain name in the text printout output.*
